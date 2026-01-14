@@ -2,9 +2,9 @@
 
 <img src="https://github.com/user-attachments/assets/b50a50bb-2404-4153-a312-aa5784a16928" alt="Claude Cowork for Linux" width="800">
 
-# Claude Cowork for Linux
+# Linux Port of Claude Desktop Cowork
 
-### Run Claude Cowork natively on Linux — no VM, no macOS required.
+### Cowork on Linux — no VM, no macOS required.
 
 <br>
 
@@ -21,9 +21,9 @@
 
 ## ![](.github/assets/icons/info-32x32.png) Overview
 
-Claude Cowork is a special version of Claude Desktop that provides an agentic AI assistant — point it at a folder and it works autonomously on your files, organizing, creating, and modifying documents while you focus on other things. It's officially **macOS-only**, using Apple's Virtualization Framework to run a sandboxed Linux VM.
+Claude Cowork is a special Claude Desktop build that can autonomously work inside a folder on your machine—creating, editing, and organizing files as it executes multi-step plans. Cowork is currently a **macOS-only preview** backed by a sandboxed Linux VM; this repo reverse-engineers and stubs the macOS-native pieces so Cowork can run directly on Linux (x86_64) with an X11 UI—no VM and no macOS required.
 
-**This project brings Cowork to Linux** by:
+**How it works:**
 
 | Step | Description |
 |:-----|:------------|
