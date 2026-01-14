@@ -1,4 +1,5 @@
 <picture>
+  <img width="2816" height="1536" alt="claude-cowork-linux" src="https://github.com/user-attachments/assets/b50a50bb-2404-4153-a312-aa5784a16928" />
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/icons/linux.png">
   <source media="(prefers-color-scheme: light)" srcset=".github/assets/icons/linux.png">
   <img alt="Linux" src=".github/assets/icons/linux.png" width="32" align="left">
