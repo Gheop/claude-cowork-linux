@@ -4,7 +4,7 @@
 
 # Claude Cowork for Linux
 
-### Run Claude's AI coding agent natively on Linux — no VM, no macOS required.
+### Run Claude Cowork natively on Linux — no VM, no macOS required.
 
 <br>
 
