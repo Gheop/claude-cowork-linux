@@ -2,6 +2,10 @@
 
 <img src="https://github.com/user-attachments/assets/b50a50bb-2404-4153-a312-aa5784a16928" alt="Claude Cowork for Linux" width="800">
 
+# Claude Cowork for Linux
+
+### Run Claude's $200/month AI coding agent natively on Linux — no VM, no macOS required.
+
 <br>
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-blue?style=flat-square)
