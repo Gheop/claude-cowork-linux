@@ -89,7 +89,45 @@ else
 
     info "Copying app resources..."
     mkdir -p "$APP_DIR"
-    cp -r "$APP_BUNDLE/Contents/Resources/app/"* "$APP_DIR/"
+
+    # Check if app.asar exists (newer versions) or app/ directory (older versions)
+    if [ -f "$APP_BUNDLE/Contents/Resources/app.asar" ]; then
+        info "Detected app.asar format, extracting..."
+
+        # Install asar if not available
+        if ! command -v npx &> /dev/null; then
+            error "npx not found. Please install Node.js first."
+            rm -rf "$TEMP_DIR"
+            exit 1
+        fi
+
+        # Extract asar file using npx
+        npx --yes asar extract "$APP_BUNDLE/Contents/Resources/app.asar" "$APP_DIR" || {
+            error "Failed to extract app.asar"
+            rm -rf "$TEMP_DIR"
+            exit 1
+        }
+
+        # Copy unpacked files if they exist
+        if [ -d "$APP_BUNDLE/Contents/Resources/app.asar.unpacked" ]; then
+            cp -r "$APP_BUNDLE/Contents/Resources/app.asar.unpacked/"* "$APP_DIR/" 2>/dev/null || true
+        fi
+
+        # Copy i18n resources (they're not in the asar)
+        info "Copying i18n resources..."
+        mkdir -p "$APP_DIR/resources/i18n"
+        cp "$APP_BUNDLE/Contents/Resources/"*.json "$APP_DIR/resources/i18n/" 2>/dev/null || true
+
+        success "app.asar extracted"
+    elif [ -d "$APP_BUNDLE/Contents/Resources/app" ]; then
+        info "Detected unpacked app/ directory format..."
+        cp -r "$APP_BUNDLE/Contents/Resources/app/"* "$APP_DIR/"
+        success "App directory copied"
+    else
+        error "Could not find app.asar or app/ directory in Claude.app"
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
 
     rm -rf "$TEMP_DIR"
     success "Claude Desktop extracted"
@@ -122,10 +160,26 @@ if [ -f "$INDEX_FILE" ]; then
         # Backup original
         cp "$INDEX_FILE" "$INDEX_FILE.bak"
 
-        # Patch Ege() function to support Linux
-        # Find: status:"unsupported",reason:"local_agent_mode_not_supported_on_platform"
-        # Add before it: if(process.platform==='linux')return{status:"supported"};
-        sed -i 's/status:"unsupported",reason:"local_agent_mode_not_supported_on_platform"/status:"supported"}/; s/status:"supported"}/if(process.platform==="linux")return{status:"supported"};return{status:"unsupported",reason:"local_agent_mode_not_supported_on_platform"}/' "$INDEX_FILE" 2>/dev/null || {
+        # Patch Ege() function to support Linux using Node.js for reliable string replacement
+        node -e "
+        const fs = require('fs');
+        const file = '$INDEX_FILE';
+        let content = fs.readFileSync(file, 'utf8');
+
+        // Find and replace the Ege function
+        const original = 'function Ege(){return process.platform!==\"darwin\"?{status:\"unsupported\",reason:\"Darwin only\"}:process.arch!==\"arm64\"?{status:\"unsupported\",reason:\"arm64 only\"}:z8().major<14?{status:\"unsupported\",reason:\"minimum macOS version not met\"}:{status:\"supported\"}}';
+
+        const patched = 'function Ege(){if(process.platform===\"linux\")return{status:\"supported\"};return process.platform!==\"darwin\"?{status:\"unsupported\",reason:\"Darwin only\"}:process.arch!==\"arm64\"?{status:\"unsupported\",reason:\"arm64 only\"}:z8().major<14?{status:\"unsupported\",reason:\"minimum macOS version not met\"}:{status:\"supported\"}}';
+
+        if (content.includes(original)) {
+          content = content.replace(original, patched);
+          fs.writeFileSync(file, content, 'utf8');
+          process.exit(0);
+        } else {
+          console.error('ERROR: Could not find Ege function to patch');
+          process.exit(1);
+        }
+        " || {
             warn "Auto-patch failed - manual patching may be required"
             echo "  See README.md for manual patching instructions"
         }

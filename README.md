@@ -198,10 +198,14 @@ claude-cowork-linux/
 │   └── assets/icons/             # Documentation icons
 ├── install.sh                    # Automated installer
 ├── run.sh                        # Launch script
+├── debug.sh                      # Multi-window debug launcher
 └── README.md                     # This file
 ```
 
 After running `install.sh`, the `app/` directory will contain the extracted Claude Desktop.
+
+> [!NOTE]
+> The installer automatically detects and extracts both `app.asar` (newer versions) and unpacked `app/` directories (older versions) from the DMG.
 
 ---
 
@@ -216,9 +220,19 @@ If the automated installer doesn't work, follow these steps:
 # Extract DMG with 7z
 7z x Claude-*.dmg -o/tmp/claude-extract
 
-# Copy app resources
+# Create app directory
 mkdir -p app
-cp -r "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app/"* app/
+
+# For newer versions (app.asar):
+if [ -f "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app.asar" ]; then
+    npx --yes asar extract "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app.asar" app
+    # Copy unpacked files if they exist
+    [ -d "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app.asar.unpacked" ] && \
+        cp -r "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app.asar.unpacked/"* app/
+# For older versions (unpacked app/):
+elif [ -d "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app" ]; then
+    cp -r "/tmp/claude-extract/Claude/Claude.app/Contents/Resources/app/"* app/
+fi
 
 # Cleanup
 rm -rf /tmp/claude-extract
@@ -341,11 +355,40 @@ Ensure the stub has methods on the `this.vm` object, not just the class.
 
 ## ![](.github/assets/icons/console-24x24.png) Development
 
-### Enable Debug Logging
+### Debug Script (Recommended)
+
+The easiest way to debug is using the included `debug.sh` script, which automatically opens 4 monitoring windows:
+
+```bash
+./debug.sh
+```
+
+This creates a multi-window layout showing:
+- **Window 1**: Main application output
+- **Window 2**: Swift stub trace log (VM operations, path translations)
+- **Window 3**: Main application log (Electron logging)
+- **Window 4**: Process monitor (live view of electron/claude processes)
+
+The script auto-detects and uses:
+- **tmux** (if available) - split-pane layout
+- **kitty** (if available) - native grid layout
+- **gnome-terminal/konsole/xterm** - separate windows
+
+All environment variables are set automatically. Logs are cleared before each run.
+
+### Manual Debug Logging
+
+If you prefer to debug manually:
 
 ```bash
 # Include Claude Code stdout/stderr in the trace log (redacted, but still treat logs as sensitive)
 export CLAUDE_COWORK_TRACE_IO=1
+
+# Enable debug mode
+export CLAUDE_COWORK_DEBUG=1
+
+# Enable Electron logging
+export ELECTRON_ENABLE_LOGGING=1
 
 # Clear old logs
 rm -f ~/.local/share/claude-cowork/logs/claude-swift-trace.log
