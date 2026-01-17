@@ -12,6 +12,10 @@ package-lock.json
 *.log
 /tmp/
 
+# Internal docs (may contain paths, session IDs, etc.)
+docs/plans/
+docs/logs/
+
 # OS files
 .DS_Store
 Thumbs.db
