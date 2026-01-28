@@ -18,11 +18,17 @@ fi
 # Enable logging
 export ELECTRON_ENABLE_LOGGING=1
 
+# Wayland support for Hyprland, Sway, and other Wayland compositors
+if [[ -n "$WAYLAND_DISPLAY" ]] || [[ "$XDG_SESSION_TYPE" == "wayland" ]]; then
+  export ELECTRON_OZONE_PLATFORM_HINT=wayland
+  echo "Wayland detected, using Ozone platform"
+fi
+
 # Create log directory
 mkdir -p ~/.local/share/claude-cowork/logs
 
-# Run with AppImage's electron (unbuffered output)
+# Run with AppImage's electron
 echo "Launching Claude Desktop..."
-exec stdbuf -oL -eL ./squashfs-root/usr/lib/node_modules/electron/dist/electron \
+exec ./squashfs-root/usr/lib/node_modules/electron/dist/electron \
   ./squashfs-root/usr/lib/node_modules/electron/dist/resources/app.asar \
-  --no-sandbox 2>&1 | stdbuf -oL tee -a ~/.local/share/claude-cowork/logs/startup.log
+  --no-sandbox 2>&1 | tee -a ~/.local/share/claude-cowork/logs/startup.log

@@ -493,8 +493,8 @@ done
 # Enable logging
 export ELECTRON_ENABLE_LOGGING=1
 
-# Launch with unbuffered output for real-time streaming
-exec stdbuf -oL -eL electron linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | stdbuf -oL tee -a ~/Library/Logs/Claude/startup.log
+# Launch
+exec electron linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | tee -a ~/Library/Logs/Claude/startup.log
 LAUNCHEREOF
 
 sudo chmod +x /Applications/Claude.app/Contents/MacOS/Claude

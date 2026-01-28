@@ -29,6 +29,11 @@ CLAUDE_VERSION="latest"
 DMG_URL_PRIMARY="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest/Claude.dmg"
 DMG_URL_FALLBACK="https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect"
 
+# Stub download URLs (from GitHub repo)
+REPO_BASE="https://raw.githubusercontent.com/johnzfitch/claude-cowork-linux/master"
+SWIFT_STUB_URL="${REPO_BASE}/stubs/@ant/claude-swift/js/index.js"
+NATIVE_STUB_URL="${REPO_BASE}/stubs/@ant/claude-native/index.js"
+
 # Minimum expected DMG size (100MB) - basic integrity check
 MIN_DMG_SIZE=100000000
 
@@ -349,392 +354,21 @@ extract_asar() {
 }
 
 # ============================================================
-# Create Linux Stubs
+# Download Linux Stubs
 # ============================================================
 
-create_swift_stub() {
+download_swift_stub() {
     local stub_dir="$1"
     mkdir -p "$stub_dir"
-
-    cat > "$stub_dir/index.js" << 'SWIFTSTUB'
-/**
- * @ant/claude-swift stub for Linux
- * Replaces macOS Swift native module with JS stubs
- */
-
-const EventEmitter = require('events');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { spawn: nodeSpawn, execFileSync } = require('child_process');
-
-const LOG_PREFIX = '[claude-swift-stub]';
-const TRACE_ENABLED = !!process.env.CLAUDE_TRACE;
-
-const SESSIONS_BASE = path.join(os.homedir(), '.local/share/claude-cowork/sessions');
-const LOG_DIR = path.join(os.homedir(), '.local/share/claude-cowork/logs');
-const CLAUDE_BINARY = path.join(os.homedir(), '.config/Claude/claude-code-vm/2.1.5/claude');
-
-const CREATED_DIRS = new Set();
-
-try {
-  fs.mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(SESSIONS_BASE, { recursive: true, mode: 0o700 });
-} catch (e) {}
-
-function trace(category, msg, data = null) {
-  if (!TRACE_ENABLED) return;
-  console.log(`[TRACE:${category}] ${msg}`);
+    curl -fsSL "$SWIFT_STUB_URL" -o "$stub_dir/index.js" || die "Failed to download Swift stub"
+    log_success "Downloaded Swift stub"
 }
 
-function createEmitterObject(name, extraMethods = {}) {
-  const emitter = new EventEmitter();
-  emitter.setMaxListeners(50);
-  emitter._stubName = name;
-
-  Object.assign(emitter, {
-    initialize: async () => true,
-    shutdown: async () => true,
-    getState: async () => ({}),
-    setState: async () => true,
-    isAvailable: () => true,
-    isEnabled: () => true,
-    isSupported: () => true,
-    enable: () => {},
-    disable: () => {},
-    ...extraMethods,
-  });
-
-  return emitter;
-}
-
-const notifications = createEmitterObject('notifications', {
-  show: async (options) => {
-    try {
-      const title = String(options?.title || 'Claude').substring(0, 200);
-      const body = String(options?.body || '').substring(0, 1000);
-      execFileSync('notify-send', [title, body], { timeout: 5000, stdio: 'ignore' });
-    } catch (e) {}
-    return { id: Date.now().toString() };
-  },
-  hide: async () => {},
-  hideAll: async () => {},
-  close: () => {},
-  requestAuth: () => Promise.resolve(true),
-  getAuthStatus: () => 'authorized',
-});
-
-const vm = createEmitterObject('vm', {
-  start: async () => ({ success: true }),
-  stop: async () => ({ success: true }),
-  startVM: async () => ({ success: true }),
-  stopVM: async () => ({ success: true }),
-  getStatus: async () => ({ running: true, connected: true, supported: true, status: 'supported' }),
-  getRunningStatus: () => ({ running: true, connected: true, ready: true, status: 'running' }),
-  getDownloadStatus: () => ({ status: 'ready', downloaded: true, installed: true, progress: 100 }),
-  getSupportStatus: () => 'supported',
-  isGuestConnected: () => true,
-  isSupported: () => true,
-  needsUpdate: () => false,
-  installSdk: async () => ({ success: true }),
-  sendMessage: async () => null,
-
-  setEventCallbacks: (onStdout, onStderr, onExit, onError, onNetworkStatus) => {
-    vm._onStdout = onStdout;
-    vm._onStderr = onStderr;
-    vm._onExit = onExit;
-    vm._onError = onError;
-    vm._onNetworkStatus = onNetworkStatus;
-    if (onNetworkStatus) onNetworkStatus('connected');
-  },
-
-  spawn: (id, processName, command, args, options, envVars, additionalMounts, isResume, allowedDomains, sharedCwdPath) => {
-    const sessionDir = path.join(SESSIONS_BASE, processName);
-    if (!CREATED_DIRS.has(sessionDir)) {
-      fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-      CREATED_DIRS.add(sessionDir);
-    }
-
-    let hostCommand = command;
-    if (command === '/usr/local/bin/claude') {
-      hostCommand = CLAUDE_BINARY;
-    }
-
-    const username = os.userInfo().username;
-    const mountMap = {};
-
-    if (additionalMounts && typeof additionalMounts === 'object') {
-      for (const [mountName, mountInfo] of Object.entries(additionalMounts)) {
-        if (mountInfo && typeof mountInfo === 'object') {
-          const relPath = mountInfo.path || '';
-          mountMap[mountName] = relPath ? path.join(os.homedir(), relPath) : os.homedir();
-        }
-      }
-    }
-
-    if (!mountMap[username]) mountMap[username] = os.homedir();
-    if (!mountMap['.claude']) mountMap['.claude'] = path.join(os.homedir(), '.claude');
-    if (!mountMap['.skills']) mountMap['.skills'] = path.join(os.homedir(), '.config/Claude/local-agent-mode-sessions/skills-plugin');
-    if (!mountMap['uploads']) mountMap['uploads'] = path.join(sessionDir, 'uploads');
-
-    for (const hostPath of Object.values(mountMap)) {
-      if (!CREATED_DIRS.has(hostPath)) {
-        try { fs.mkdirSync(hostPath, { recursive: true, mode: 0o700 }); CREATED_DIRS.add(hostPath); } catch(e) {}
-      }
-    }
-
-    const vmSessionPath = `/sessions/${processName}`;
-    const isolateNetwork = process.env.CLAUDE_ISOLATE_NETWORK === 'true';
-
-    const bwrapArgs = [
-      '--unshare-user', '--uid', String(process.getuid()), '--gid', String(process.getgid()), '--die-with-parent',
-      ...(isolateNetwork ? ['--unshare-net'] : []),
-      '--tmpfs', '/',
-      '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib', '--ro-bind', '/etc', '/etc',
-      '--bind', os.homedir(), os.homedir(),
-      '--tmpfs', '/tmp', '--dev', '/dev', '--proc', '/proc',
-    ];
-
-    for (const optDir of ['/lib64', '/lib32', '/opt', '/snap', '/nix']) {
-      try { if (fs.existsSync(optDir)) bwrapArgs.push('--ro-bind', optDir, optDir); } catch(e) {}
-    }
-
-    bwrapArgs.push('--dir', '/sessions', '--dir', vmSessionPath, '--dir', `${vmSessionPath}/mnt`);
-
-    for (const [mountName, hostPath] of Object.entries(mountMap)) {
-      const vmMountPath = `${vmSessionPath}/mnt/${mountName}`;
-      bwrapArgs.push('--dir', vmMountPath, '--bind', hostPath, vmMountPath);
-    }
-
-    const vmCwd = sharedCwdPath || `${vmSessionPath}/mnt/${username}`;
-    bwrapArgs.push('--chdir', vmCwd, '--', hostCommand, ...(args || []));
-
-    const userInfo = os.userInfo();
-    const vmEnv = {
-      HOME: os.homedir(), USER: userInfo.username, LOGNAME: userInfo.username,
-      SHELL: userInfo.shell || '/bin/bash', TERM: process.env.TERM || 'xterm-256color',
-      LANG: process.env.LANG || 'en_US.UTF-8', PATH: '/usr/local/bin:/usr/bin:/bin',
-      TMPDIR: '/tmp', CLAUDE_COWORK_SESSION: processName, CLAUDE_SANDBOX: 'true',
-      ...envVars,
-      ...(process.env.DISPLAY && { DISPLAY: process.env.DISPLAY }),
-      ...(process.env.WAYLAND_DISPLAY && { WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY }),
-    };
-
-    try {
-      const proc = nodeSpawn('bwrap', bwrapArgs, { env: vmEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-      vm._processes = vm._processes || new Map();
-      vm._processes.set(id, proc);
-
-      const cleanup = () => { vm._processes?.delete(id); };
-
-      if (proc.stdout) proc.stdout.on('data', (data) => { if (vm._onStdout) vm._onStdout(id, data.toString('utf-8')); });
-      if (proc.stderr) proc.stderr.on('data', (data) => { if (vm._onStderr) vm._onStderr(id, data.toString('utf-8')); });
-      proc.on('exit', (code, signal) => { cleanup(); if (vm._onExit) vm._onExit(id, code || 0, signal || ''); });
-      proc.on('error', (err) => { cleanup(); if (vm._onError) vm._onError(id, err.message, err.stack); });
-
-      return { success: true, pid: proc.pid };
-    } catch (err) {
-      if (vm._onError) vm._onError(id, err.message, err.stack);
-      return { success: false, error: err.message };
-    }
-  },
-
-  kill: async (id, signal) => {
-    const proc = vm._processes?.get(id);
-    if (proc) { try { proc.kill(signal || 'SIGTERM'); } catch (err) {} vm._processes.delete(id); }
-  },
-
-  writeStdin: (id, data) => {
-    const proc = vm._processes?.get(id);
-    if (proc && proc.stdin && !proc.stdin.destroyed) { proc.stdin.write(data); return true; }
-    return false;
-  },
-
-  readFile: async (sessionName, vmPath) => {
-    let hostPath = vmPath;
-    if (vmPath?.startsWith('/sessions/')) hostPath = path.join(SESSIONS_BASE, vmPath.substring('/sessions/'.length));
-    return fs.readFileSync(hostPath).toString('base64');
-  },
-
-  writeFile: async (sessionName, vmPath, base64Content) => {
-    let hostPath = vmPath;
-    if (vmPath?.startsWith('/sessions/')) hostPath = path.join(SESSIONS_BASE, vmPath.substring('/sessions/'.length));
-    const dir = path.dirname(hostPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(hostPath, Buffer.from(base64Content, 'base64'), { mode: 0o600 });
-    return true;
-  },
-
-  mountPath: async () => ({ success: true }),
-  addApprovedOauthToken: async () => ({ success: true }),
-  isDebugLoggingEnabled: () => TRACE_ENABLED,
-  setDebugLogging: () => {},
-  showDebugWindow: () => {},
-  hideDebugWindow: () => {},
-  isConsoleEnabled: () => !!process.env.CLAUDE_ENABLE_LOGGING,
-});
-
-const clipboard = createEmitterObject('clipboard', {
-  read: () => {
-    try { return execFileSync('xclip', ['-selection', 'clipboard', '-o'], { encoding: 'utf-8', timeout: 2000 }); }
-    catch (e) { try { return execFileSync('xsel', ['--clipboard', '--output'], { encoding: 'utf-8', timeout: 2000 }); } catch (e2) { return ''; } }
-  },
-  write: (text) => {
-    try { execFileSync('xclip', ['-selection', 'clipboard'], { input: text, timeout: 2000 }); }
-    catch (e) { try { execFileSync('xsel', ['--clipboard', '--input'], { input: text, timeout: 2000 }); } catch (e2) {} }
-  },
-  readImage: async () => null,
-  writeImage: async () => {},
-  clear: () => {},
-});
-
-const dictation = createEmitterObject('dictation', { start: async () => false, stop: async () => {}, isListening: () => false, isRecording: () => false });
-const quickAccess = createEmitterObject('quickAccess', { show: () => {}, hide: () => {}, toggle: () => {}, isVisible: () => false, submit: () => {} });
-const desktop = createEmitterObject('desktop', {
-  getDisplays: async () => [], getActiveWindow: async () => null, getOpenWindows: async () => [], getOpenDocuments: async () => [],
-  captureScreen: async () => null, captureScreenshot: async () => null, captureWindow: async () => null, captureWindowScreenshot: async () => null,
-  getSessionId: () => 'linux-session-' + Date.now(),
-  openFile: (filePath) => { const { execFile } = require('child_process'); execFile('xdg-open', [filePath]); return Promise.resolve(true); },
-  revealFile: (filePath) => { const { execFile } = require('child_process'); execFile('xdg-open', [path.dirname(filePath)]); return Promise.resolve(true); },
-  previewFile: (filePath) => { const { execFile } = require('child_process'); execFile('xdg-open', [filePath]); return Promise.resolve(true); },
-});
-const events = createEmitterObject('events', { setListener: (cb) => { events._listener = cb; } });
-const windowModule = createEmitterObject('window', {
-  focus: async () => {}, blur: async () => {}, minimize: async () => {}, maximize: async () => {}, restore: async () => {}, close: async () => {},
-  setTitle: async () => {}, setBounds: async () => {}, getBounds: async () => ({ x: 0, y: 0, width: 800, height: 600 }),
-  setWindowButtonPosition: () => {}, setTrafficLightPosition: () => {}, setThemeMode: () => {},
-});
-
-async function openFileDialog(options = {}) {
-  try {
-    const { dialog } = require('electron');
-    const isDirectory = options.directory || options.properties?.includes('openDirectory');
-    const isMultiple = options.multiple || options.properties?.includes('multiSelections');
-    const isSave = options.save;
-    const title = options.title || (isDirectory ? 'Select Folder' : 'Select File');
-    const defaultPath = options.defaultPath || os.homedir();
-
-    if (isSave) {
-      const result = await dialog.showSaveDialog({ title, defaultPath, properties: ['createDirectory', 'showOverwriteConfirmation'] });
-      return result.canceled ? [] : [result.filePath];
-    } else {
-      const properties = isDirectory ? ['openDirectory', 'createDirectory'] : ['openFile'];
-      if (isMultiple) properties.push('multiSelections');
-      const result = await dialog.showOpenDialog({ title, defaultPath, properties });
-      return result.canceled ? [] : result.filePaths;
-    }
-  } catch (err) { return [os.homedir()]; }
-}
-
-const files = createEmitterObject('files', {
-  select: async (options) => openFileDialog(options),
-  save: async (options) => { const r = await openFileDialog({ ...options, save: true }); return r.length > 0 ? r[0] : null; },
-  reveal: (filePath) => { const { spawn } = require('child_process'); spawn('xdg-open', [path.dirname(filePath)], { detached: true, stdio: 'ignore' }); },
-  read: (filePath) => Promise.resolve(fs.readFileSync(filePath, 'utf-8')),
-  write: (filePath, content) => { fs.writeFileSync(filePath, content, 'utf-8'); return Promise.resolve(true); },
-  exists: (filePath) => Promise.resolve(fs.existsSync(filePath)),
-  stat: (filePath) => { const s = fs.statSync(filePath); return Promise.resolve({ size: s.size, isFile: s.isFile(), isDirectory: s.isDirectory(), created: s.birthtime, modified: s.mtime }); },
-  list: (dirPath) => { const e = fs.readdirSync(dirPath, { withFileTypes: true }); return Promise.resolve(e.map(x => ({ name: x.name, isFile: x.isFile(), isDirectory: x.isDirectory(), path: path.join(dirPath, x.name) }))); },
-});
-
-const midnightOwl = createEmitterObject('midnightOwl', { getState: async () => ({ enabled: false }), setEnabled: () => {}, getEnabled: () => false });
-const api = createEmitterObject('api', {});
-
-class ClaudeSwiftInstance extends EventEmitter {
-  constructor() {
-    super();
-    this.setMaxListeners(50);
-    this.notifications = notifications; this.vm = vm; this.clipboard = clipboard; this.dictation = dictation;
-    this.quickAccess = quickAccess; this.desktop = desktop; this.events = events; this.window = windowModule;
-    this.files = files; this.midnightOwl = midnightOwl; this.api = api;
-    this.initialize = async () => true; this.shutdown = async () => {};
-    this.setWindowButtonPosition = () => {}; this.setThemeMode = () => {}; this.setApplicationMenu = () => {};
-  }
-}
-
-const instance = new ClaudeSwiftInstance();
-
-setTimeout(() => {
-  instance.emit('guestConnectionChanged', { connected: true });
-  instance.emit('guestReady');
-  vm.emit('guestConnectionChanged', { connected: true });
-  vm.emit('guestReady');
-}, 100);
-
-module.exports = instance;
-module.exports.default = instance;
-module.exports.notifications = notifications; module.exports.vm = vm; module.exports.clipboard = clipboard;
-module.exports.dictation = dictation; module.exports.quickAccess = quickAccess; module.exports.desktop = desktop;
-module.exports.events = events; module.exports.window = windowModule; module.exports.files = files;
-module.exports.midnightOwl = midnightOwl; module.exports.api = api;
-SWIFTSTUB
-
-    log_success "Created Swift stub"
-}
-
-create_native_stub() {
+download_native_stub() {
     local stub_dir="$1"
     mkdir -p "$stub_dir"
-
-    cat > "$stub_dir/index.js" << 'NATIVESTUB'
-/**
- * Linux stub for @ant/claude-native
- */
-
-const { ipcMain } = require('electron');
-const EventEmitter = require('events');
-const path = require('path');
-const os = require('os');
-
-const LOG_PREFIX = '[claude-native-stub]';
-
-function safeHandle(channel, handler) {
-  try { ipcMain.handle(channel, handler); return true; }
-  catch (e) { return false; }
-}
-
-const KeyboardKeys = { ESCAPE: 27, ENTER: 13, TAB: 9, BACKSPACE: 8, DELETE: 46, ARROW_UP: 38, ARROW_DOWN: 40, ARROW_LEFT: 37, ARROW_RIGHT: 39 };
-
-class AuthRequest extends EventEmitter {
-  start(url) {
-    const { execFile } = require('child_process');
-    execFile('xdg-open', [url]);
-    setTimeout(() => this.emit('error', new Error('Authentication via system browser')), 100);
-  }
-  cancel() { this.emit('cancelled'); }
-  static isAvailable() { return false; }
-}
-
-const nativeStub = {
-  platform: 'linux', arch: process.arch,
-  getSystemTheme: () => 'dark', setDockBadge: () => {}, showNotification: () => {},
-  revealInFinder: (p) => { const { spawn } = require('child_process'); spawn('xdg-open', [path.dirname(p)], { detached: true, stdio: 'ignore' }); },
-  isAccessibilityEnabled: () => true, requestAccessibilityPermission: () => Promise.resolve(true),
-  hasScreenCapturePermission: () => true, requestScreenCapturePermission: () => Promise.resolve(true),
-};
-
-function focus_window() { return false; }
-function get_active_window_handle() { return null; }
-function read_plist_value() { return null; }
-function read_cf_pref_value() { return null; }
-function read_registry_values() { return null; }
-function write_registry_value() { return false; }
-function get_app_info_for_file() { return null; }
-
-console.log(LOG_PREFIX, 'stub loaded');
-
-module.exports = {
-  KeyboardKeys, AuthRequest,
-  focus_window, focusWindow: focus_window, get_active_window_handle, getActiveWindowHandle: get_active_window_handle,
-  read_plist_value, readPlistValue: read_plist_value, read_cf_pref_value, readCfPrefValue: read_cf_pref_value,
-  read_registry_values, readRegistryValues: read_registry_values, write_registry_value, writeRegistryValue: write_registry_value,
-  get_app_info_for_file, getAppInfoForFile: get_app_info_for_file,
-  ...nativeStub,
-};
-module.exports.default = module.exports;
-NATIVESTUB
-
-    log_success "Created Native stub"
+    curl -fsSL "$NATIVE_STUB_URL" -o "$stub_dir/index.js" || die "Failed to download Native stub"
+    log_success "Downloaded Native stub"
 }
 
 # ============================================================
@@ -909,8 +543,14 @@ for arg in "$@"; do
 done
 
 export ELECTRON_ENABLE_LOGGING=1
-# Unbuffered output for real-time streaming
-exec stdbuf -oL -eL electron linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | stdbuf -oL tee -a ~/Library/Logs/Claude/startup.log
+
+# Wayland support for Hyprland, Sway, and other Wayland compositors
+if [[ -n "$WAYLAND_DISPLAY" ]] || [[ "$XDG_SESSION_TYPE" == "wayland" ]]; then
+  export ELECTRON_OZONE_PLATFORM_HINT=wayland
+fi
+
+# Launch Electron
+exec electron linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | tee -a ~/Library/Logs/Claude/startup.log
 LAUNCHER
 
     chmod +x "$macos_dir/Claude"
@@ -965,9 +605,9 @@ install_app() {
 
     sudo mkdir -p "$stub_swift_dir" "$stub_native_dir"
 
-    # Create stubs in temp then copy
-    create_swift_stub "$WORK_DIR/stubs/swift"
-    create_native_stub "$WORK_DIR/stubs/native"
+    # Download stubs from repo then copy
+    download_swift_stub "$WORK_DIR/stubs/swift"
+    download_native_stub "$WORK_DIR/stubs/native"
 
     sudo cp "$WORK_DIR/stubs/swift/index.js" "$stub_swift_dir/index.js"
     sudo cp "$WORK_DIR/stubs/native/index.js" "$stub_native_dir/index.js"

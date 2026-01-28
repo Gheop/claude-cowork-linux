@@ -275,9 +275,8 @@ const vm = createEmitterObject('vm', {
     let vmCwd = sharedCwdPath || `${vmSessionPath}/mnt/${username}`;
     bwrapArgs.push('--chdir', vmCwd);
 
-    // Add the actual command to run with stdbuf to force line-buffered output
-    // This prevents output batching and ensures real-time streaming
-    bwrapArgs.push('--', 'stdbuf', '-oL', '-eL', hostCommand, ...(args || []));
+    // Add the actual command to run
+    bwrapArgs.push('--', hostCommand, ...(args || []));
 
     trace('vm', 'spawn bwrap', { bwrapArgs: bwrapArgs.slice(0, 20) });
 
