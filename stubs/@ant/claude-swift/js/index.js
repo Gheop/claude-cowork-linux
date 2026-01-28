@@ -336,11 +336,13 @@ const vm = createEmitterObject('vm', {
 
       if (proc.stdout) {
         proc.stdout.on('data', (data) => {
+          trace('vm', 'stdout', { id, len: data.length });
           if (vm._onStdout) vm._onStdout(id, data.toString('utf-8'));
         });
       }
       if (proc.stderr) {
         proc.stderr.on('data', (data) => {
+          trace('vm', 'stderr', { id, len: data.length });
           if (vm._onStderr) vm._onStderr(id, data.toString('utf-8'));
         });
       }
