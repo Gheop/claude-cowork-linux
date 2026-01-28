@@ -90,6 +90,52 @@ detect_pkg_manager() {
 # ============================================================
 
 install_dependencies() {
+
+# Portable file size formatter (replacement for numfmt)
+format_size() {
+    local size=$1
+    local units=("B" "KB" "MB" "GB" "TB")
+    local unit=0
+    local num=$size
+    
+    while (( num > 1024 && unit < 4 )); do
+        num=$((num / 1024))
+        unit=$((unit + 1))
+    done
+    
+    echo "${num}${units[$unit]}"
+}
+
+# Optional SHA256 verification if checksum is known
+verify_checksum() {
+    local file_path="$1"
+    local expected_sha256="${CLAUDE_DMG_SHA256:-}"
+    
+    if [[ -z "$expected_sha256" ]]; then
+        log_warn "No SHA256 checksum provided (set CLAUDE_DMG_SHA256=<hash> to verify)"
+        log_info "Anthropic does not publish official checksums for Claude Desktop DMG"
+        log_info "Download source: $DMG_URL_PRIMARY"
+        return 0
+    fi
+    
+    log_info "Verifying SHA256 checksum..."
+    local actual_sha256
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_sha256=$(sha256sum "$file_path" | awk "{print \$1}")
+    elif command -v shasum >/dev/null 2>&1; then
+        actual_sha256=$(shasum -a 256 "$file_path" | awk "{print \$1}")
+    else
+        log_warn "No SHA256 tool available (sha256sum or shasum required)"
+        return 0
+    fi
+    
+    if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+        die "SHA256 checksum mismatch! Expected: $expected_sha256, Got: $actual_sha256"
+    fi
+    
+    log_success "SHA256 checksum verified"
+}
+
     log_info "Checking dependencies..."
 
     local pkg_manager
@@ -126,8 +172,8 @@ install_dependencies() {
                 sudo apt-get install -y p7zip-full nodejs npm bubblewrap
                 ;;
             pacman)
-                # Use -Syu for full sync to avoid partial upgrade issues
-                sudo pacman -Syu --noconfirm --needed p7zip nodejs npm bubblewrap
+                # Install only required packages without system upgrade
+                sudo pacman -S --noconfirm --needed p7zip nodejs npm bubblewrap
                 ;;
             dnf)
                 sudo dnf install -y p7zip nodejs npm bubblewrap
@@ -260,7 +306,10 @@ download_dmg() {
     if [[ ! -f "$dmg_path" ]] || [[ "$dmg_size" -lt "$MIN_DMG_SIZE" ]]; then
         die "Download appears incomplete or corrupted (size: ${dmg_size} bytes, expected >100MB)"
     fi
-    log_success "Download verified ($(numfmt --to=iec "$dmg_size" 2>/dev/null || echo "${dmg_size} bytes"))"
+    log_success "Download verified ($(format_size "$dmg_size"))"
+    
+    # Optional SHA256 verification
+    verify_checksum "$dmg_path"
 }
 
 # ============================================================
