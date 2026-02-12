@@ -15,7 +15,7 @@
  *   - Then vm.spawn() to launch the Claude Code binary
  *
  * Path translations performed:
- *   - /usr/local/bin/claude -> ~/Library/Application Support/Claude/claude-code-vm/<latest>/claude
+ *   - /usr/local/bin/claude -> resolved via claude-code-vm (macOS) or ~/.local/bin/claude (Linux)
  *   - /sessions/... -> ~/Library/Application Support/Claude/LocalAgentModeSessions/sessions/...
  *
  * Security hardening applied:
@@ -149,8 +149,8 @@ function compareSemverDesc(a, b) {
 }
 
 function resolveClaudeBinaryPath() {
+  // 1. Try macOS-style claude-code-vm path (for macOS/VM compatibility)
   const vmRoot = path.join(APP_SUPPORT_ROOT, 'claude-code-vm');
-  const preferred = path.join(vmRoot, '2.1.5', 'claude');
   try {
     const entries = fs
       .readdirSync(vmRoot, { withFileTypes: true })
@@ -161,16 +161,42 @@ function resolveClaudeBinaryPath() {
     for (const version of entries) {
       const candidate = path.join(vmRoot, version, 'claude');
       if (fs.existsSync(candidate)) {
-        trace('Resolved Claude binary: ' + candidate);
+        trace('Resolved Claude binary (claude-code-vm): ' + candidate);
         return candidate;
       }
     }
   } catch (e) {
-    trace('Failed to auto-resolve claude-code-vm version: ' + e.message);
+    trace('claude-code-vm not available: ' + e.message);
   }
 
-  trace('Falling back to default Claude binary path: ' + preferred);
-  return preferred;
+  // 2. On Linux, find the native Claude Code CLI binary
+  if (process.env.CLAUDE_CODE_PATH) {
+    const envPath = process.env.CLAUDE_CODE_PATH;
+    if (fs.existsSync(envPath)) {
+      trace('Resolved Claude binary (CLAUDE_CODE_PATH): ' + envPath);
+      return envPath;
+    }
+  }
+
+  const home = os.homedir();
+  const linuxCandidates = [
+    path.join(home, '.local/bin/claude'),
+    path.join(home, '.npm-global/bin/claude'),
+    '/usr/local/bin/claude',
+    '/usr/bin/claude',
+  ];
+  for (const candidate of linuxCandidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        trace('Resolved Claude binary (Linux): ' + candidate);
+        return candidate;
+      }
+    } catch (_) { /* skip */ }
+  }
+
+  // Last resort: let PATH resolve it
+  trace('No Claude binary found at known paths, falling back to PATH lookup');
+  return 'claude';
 }
 
 /**
@@ -239,16 +265,36 @@ function createMountSymlinks(sessionName, additionalMounts) {
 
     // Handle special cases
     if (mountName === 'uploads') {
-      // uploads is a directory, not a symlink
+      // On macOS, uploads is a VM shared mount. On Linux (no VM),
+      // we symlink to the host uploads dir so Claude Code can see files.
+      const uploadsRelPath = (typeof mountInfo === 'object' && mountInfo !== null) ? (mountInfo.path || '') : String(mountInfo || '');
+      const hostUploadsPath = path.join(os.homedir(), uploadsRelPath);
       try {
-        if (!fs.existsSync(mountPoint)) {
-          fs.mkdirSync(mountPoint, { recursive: true, mode: 0o700 });
-          trace('  Created uploads directory: ' + mountPoint);
-        } else {
-          trace('  Uploads directory already exists: ' + mountPoint);
+        fs.mkdirSync(hostUploadsPath, { recursive: true, mode: 0o700 });
+        if (fs.existsSync(mountPoint)) {
+          const stat = fs.lstatSync(mountPoint);
+          if (stat.isSymbolicLink()) {
+            const target = fs.readlinkSync(mountPoint);
+            if (target === hostUploadsPath) {
+              trace('  Uploads symlink already correct: ' + mountPoint + ' -> ' + hostUploadsPath);
+              continue;
+            }
+            fs.unlinkSync(mountPoint);
+          } else if (stat.isDirectory()) {
+            // Replace empty directory with symlink
+            fs.rmdirSync(mountPoint);
+          }
         }
+        fs.symlinkSync(hostUploadsPath, mountPoint);
+        trace('  Created uploads symlink: ' + mountPoint + ' -> ' + hostUploadsPath);
       } catch (e) {
-        trace('  ERROR creating uploads directory: ' + e.message);
+        trace('  ERROR creating uploads symlink: ' + e.message);
+        // Fallback: create directory so process doesn't crash
+        try {
+          if (!fs.existsSync(mountPoint)) {
+            fs.mkdirSync(mountPoint, { recursive: true, mode: 0o700 });
+          }
+        } catch (_) {}
       }
       continue;
     }
@@ -773,9 +819,19 @@ class SwiftAddonStub extends EventEmitter {
         }
 
         // SECURITY: Verify binary exists and is in expected location
-        const expectedDir = path.join(APP_SUPPORT_ROOT, 'claude-code-vm');
-        if (!hostCommand.startsWith(expectedDir)) {
-          trace('SECURITY: Command outside expected directory: ' + hostCommand);
+        const home = os.homedir();
+        const allowedPrefixes = [
+          path.join(APP_SUPPORT_ROOT, 'claude-code-vm'),
+          path.join(home, '.local/bin/'),
+          path.join(home, '.local/share/claude/'),
+          path.join(home, '.npm-global/bin/'),
+          '/usr/local/bin/',
+          '/usr/bin/',
+        ];
+        const commandIsAllowed = hostCommand === 'claude' ||
+          allowedPrefixes.some(prefix => hostCommand.startsWith(prefix));
+        if (!commandIsAllowed) {
+          trace('SECURITY: Command outside allowed directories: ' + hostCommand);
           if (self._onError) self._onError(id, 'Invalid binary path', '');
           return { success: false, error: 'Invalid binary path' };
         }
@@ -826,7 +882,7 @@ class SwiftAddonStub extends EventEmitter {
 
       kill: (id, signal) => {
         console.log('[claude-swift] vm.kill(' + id + ', ' + signal + ')');
-        return Promise.resolve(self.killProcess(id));
+        return Promise.resolve(self.killProcess(id, signal));
       },
 
       writeStdin: (id, data) => {
@@ -1051,7 +1107,7 @@ class SwiftAddonStub extends EventEmitter {
 
   kill(id, signal) {
     console.log('[claude-swift] kill(' + id + ', ' + signal + ')');
-    return this.killProcess(id);
+    return this.killProcess(id, signal);
   }
 
   writeStdin(id, data) {
@@ -1079,7 +1135,7 @@ class SwiftAddonStub extends EventEmitter {
           for (const line of lines) {
             if (line.trim() && self._onStdout) {
               if (TRACE_IO) {
-                trace('stdout line: ' + line.substring(0, 200) + (line.length > 200 ? '...' : ''));
+                trace('stdout line: ' + line.substring(0, 500) + (line.length > 500 ? '...' : ''));
               }
               self._onStdout(id, line + '\n');
             }
@@ -1147,12 +1203,35 @@ class SwiftAddonStub extends EventEmitter {
     this._emit('guestConnectionChanged', { connected: false });
   }
 
-  killProcess(id) {
+  killProcess(id, signal) {
     console.log('[claude-swift] killProcess(' + id + ')');
     const proc = this._processes.get(id);
     if (proc) {
-      try { proc.kill('SIGTERM'); } catch (e) {}
-      this._processes.delete(id);
+      const sig = (typeof signal === 'string' && signal.length > 0) ? signal : 'SIGTERM';
+      if (proc.exitCode !== null) return;
+
+      // In LocalAgentMode, the desktop may call kill() immediately after receiving a result.
+      // SIGTERM'ing too early can prevent Claude Code from persisting the conversation, which
+      // breaks `--resume <session_id>` on the next turn. Give it a brief grace period.
+      if (sig === 'SIGTERM') {
+        if (!proc.__coworkKillTimers) proc.__coworkKillTimers = {};
+        if (proc.__coworkKillTimers.term) return;
+
+        proc.__coworkKillTimers.term = setTimeout(() => {
+          try {
+            if (proc.exitCode === null) proc.kill('SIGTERM');
+          } catch (_e) { /* ignore */ }
+        }, 1000);
+
+        proc.__coworkKillTimers.kill = setTimeout(() => {
+          try {
+            if (proc.exitCode === null) proc.kill('SIGKILL');
+          } catch (_e) { /* ignore */ }
+        }, 6000);
+        return;
+      }
+
+      try { proc.kill(sig); } catch (_e) { /* ignore */ }
     }
   }
 

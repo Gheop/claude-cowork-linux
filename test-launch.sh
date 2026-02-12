@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test launcher for claude-cowork-linux
-# Uses the AppImage's electron with repacked asar (the approach that worked)
+# Uses the AppImage's electron with a repacked app.asar (bakes in stubs/patches)
 
 # Change to script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,9 +8,17 @@ cd "$SCRIPT_DIR"
 
 ASAR_FILE="squashfs-root/usr/lib/node_modules/electron/dist/resources/app.asar"
 STUB_FILE="linux-app-extracted/node_modules/@ant/claude-swift/js/index.js"
+STUB_SRC_FILE="stubs/@ant/claude-swift/js/index.js"
+
+# Ensure the extracted app tree has the latest stub baked in before packing.
+# This avoids relying on runtime module interception (ESM import() bypasses Module._load).
+if [ -f "$STUB_SRC_FILE" ]; then
+  mkdir -p "$(dirname "$STUB_FILE")"
+  cp -f "$STUB_SRC_FILE" "$STUB_FILE"
+fi
 
 # Only repack if stub is newer than asar (or asar doesn't exist)
-if [ ! -f "$ASAR_FILE" ] || [ "$STUB_FILE" -nt "$ASAR_FILE" ]; then
+if [ ! -f "$ASAR_FILE" ] || [ "$STUB_FILE" -nt "$ASAR_FILE" ] || [ "linux-app-extracted/frame-fix-wrapper.js" -nt "$ASAR_FILE" ] || [ "linux-app-extracted/ipc-handler-setup.js" -nt "$ASAR_FILE" ]; then
   echo "Repacking app.asar (stub changed)..."
   asar pack linux-app-extracted "$ASAR_FILE"
 else
@@ -32,5 +40,5 @@ mkdir -p ~/.local/share/claude-cowork/logs
 # Run with AppImage's electron - use app/ directory instead of asar for better stub handling
 echo "Launching Claude Desktop..."
 exec ./squashfs-root/usr/lib/node_modules/electron/dist/electron \
-  ./squashfs-root/usr/lib/node_modules/electron/dist/resources/app \
+  "./${ASAR_FILE}" \
   --no-sandbox 2>&1 | tee -a ~/.local/share/claude-cowork/logs/startup.log
