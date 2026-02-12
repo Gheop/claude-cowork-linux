@@ -471,7 +471,12 @@ ipcMain.on = function(channel, handler) {
 // ============================================================
 
 // The app uses eipc pattern: $eipc_message$_<UUID>_$_<namespace>_$_<handler>
-const EIPC_UUID = 'c42e5915-d1f8-48a1-a373-fe793971fdbd';
+// We see multiple UUIDs in the wild: main-process and main-view.
+// If we only register one, the other path errors with "No handler registered".
+const EIPC_UUIDS = [
+  'c42e5915-d1f8-48a1-a373-fe793971fdbd', // main-process
+  '5fdd886a-1e8d-42a1-8970-2f5b612dd244', // main-view
+];
 const EIPC_NAMESPACES = ['claude.web', 'claude.hybrid', 'claude.settings'];
 
 // Track registered handlers to avoid duplicates
@@ -484,27 +489,29 @@ const registeredHandlers = new Set();
  * @param {boolean} isSync - Whether to use ipcMain.on (sync) vs ipcMain.handle (async)
  */
 function registerEipcHandler(handlerName, handler, isSync = false) {
-  for (const ns of EIPC_NAMESPACES) {
-    const channel = `$eipc_message$_${EIPC_UUID}_$_${ns}_$_${handlerName}`;
-    if (registeredHandlers.has(channel)) continue;
+  for (const uuid of EIPC_UUIDS) {
+    for (const ns of EIPC_NAMESPACES) {
+      const channel = `$eipc_message$_${uuid}_$_${ns}_$_${handlerName}`;
+      if (registeredHandlers.has(channel)) continue;
 
-    try {
-      if (isSync) {
-        ipcMain.on(channel, (event, ...args) => {
-          try {
-            event.returnValue = handler(event, ...args);
-          } catch (e) {
-            console.error(`[IPC] Sync handler error ${handlerName}:`, e.message);
-            event.returnValue = { result: null, error: e.message };
-          }
-        });
-      } else {
-        ipcMain.handle(channel, handler);
-      }
-      registeredHandlers.add(channel);
-    } catch (e) {
-      if (!e.message.includes('already registered')) {
-        console.error(`[IPC] Failed to register ${handlerName}:`, e.message);
+      try {
+        if (isSync) {
+          ipcMain.on(channel, (event, ...args) => {
+            try {
+              event.returnValue = handler(event, ...args);
+            } catch (e) {
+              console.error(`[IPC] Sync handler error ${handlerName}:`, e.message);
+              event.returnValue = { result: null, error: e.message };
+            }
+          });
+        } else {
+          ipcMain.handle(channel, handler);
+        }
+        registeredHandlers.add(channel);
+      } catch (e) {
+        if (!e.message.includes('already registered')) {
+          console.error(`[IPC] Failed to register ${handlerName}:`, e.message);
+        }
       }
     }
   }
@@ -609,6 +616,13 @@ function normalizeSessionId(sessionId) {
   return sessionId.startsWith('local_') ? sessionId : `local_${sessionId}`;
 }
 
+function normalizeConversationUuid(value) {
+  if (typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return value;
+  }
+  return generateUUID();
+}
+
 function buildSession(info = {}) {
   const sessionId = normalizeSessionId(info.sessionId);
   const cwd = typeof info.sharedCwdPath === 'string' && info.sharedCwdPath.length > 0
@@ -618,8 +632,8 @@ function buildSession(info = {}) {
 
   return {
     sessionId,
-    uuid: sessionId,
-    conversationUuid: sessionId,
+    uuid: normalizeConversationUuid(info.uuid),
+    conversationUuid: normalizeConversationUuid(info.conversationUuid),
     cwd,
     originCwd: cwd,
     userSelectedFolders: Array.isArray(info.userSelectedFolders) ? info.userSelectedFolders : [],
@@ -695,8 +709,8 @@ function loadState() {
       const session = {
         ...rawSession,
         sessionId,
-        uuid: sessionId,
-        conversationUuid: rawSession.conversationUuid || sessionId,
+        uuid: normalizeConversationUuid(rawSession.uuid),
+        conversationUuid: normalizeConversationUuid(rawSession.conversationUuid),
         isRunning: false, // Not running after restart
         transcript: [],
       };
@@ -743,12 +757,16 @@ registerEipcHandler('LocalAgentModeSessions_$_sendMessage', async (_event, sessi
     session.transcript.push(entry);
     session.lastActivityAt = Date.now();
     scheduleSave('sendMessage');
-    emitLocalAgentEvent({ type: 'message', sessionId, message: entry });
+    emitLocalAgentEvent({ type: 'data', sessionId, data: JSON.stringify(entry) });
 
     try {
-      await sdkBridge.sendMessage(sessionId, message);
+      await sdkBridge.sendMessage(sessionId, message, images, files);
     } catch (e) {
       console.error('[Cowork] sendMessage bridge error:', e.message);
+      emitLocalAgentEvent({
+        type: 'data', sessionId,
+        data: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: `[Error processing message: ${e.message}]` }] }),
+      });
     }
   }
 });
@@ -905,6 +923,22 @@ registerEipcHandler('LocalPlugins_$_getPlugins', async () => []);
 registerEipcHandler('Account_$_setAccountDetails', async () => ({
   success: true,
 }));
+
+// ===== Auth (OAuth browser flow) =====
+registerEipcHandler('Auth_$_doAuthInBrowser', async (_event, url) => {
+  if (typeof url !== 'string' || url.length === 0) {
+    throw new Error('Invalid url');
+  }
+
+  // SECURITY: only allow URL opens, never shell-evaluate
+  const { execFile } = require('child_process');
+  return await new Promise((resolve, reject) => {
+    execFile('xdg-open', [url], (err) => {
+      if (err) return reject(err);
+      resolve({ success: true });
+    });
+  });
+});
 
 // ===== QuickEntry =====
 registerEipcHandler('QuickEntry_$_setRecentChats', async () => ({
