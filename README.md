@@ -12,7 +12,8 @@ That's it! The installer will:
 - Install dependencies (7z, node, electron, asar, bubblewrap)
 - Download Claude Desktop from Anthropic's CDN
 - Extract and patch for Linux compatibility
-- Create desktop entry and `claude` command
+- Create desktop entry plus `claude-desktop` and `claude-cowork` launchers
+- Register `claude://` URL handling for desktop OAuth callback flow
 
 ## Features
 
@@ -58,10 +59,11 @@ Dependencies are auto-installed, but for reference:
 ## Usage
 
 ```bash
-claude                    # Normal launch
-claude --debug            # Enable trace logging
-claude --devtools         # Enable Chrome DevTools
-claude --isolate-network  # Run with network isolation
+claude-cowork             # Recommended launcher
+claude-desktop            # Equivalent launcher
+claude-cowork --debug     # Enable trace logging
+claude-cowork --devtools  # Enable Chrome DevTools
+claude-cowork --isolate-network  # Run with network isolation
 ```
 
 ## Directory Structure
@@ -98,6 +100,12 @@ Ensure xdg-desktop-portal is running:
 systemctl --user status xdg-desktop-portal
 ```
 
+### OAuth callback (`claude://`) does not return to app
+Verify desktop protocol registration:
+```bash
+xdg-mime query default x-scheme-handler/claude
+```
+
 ### Window appears dimmed (Hyprland)
 Add the Claude window rules - see Hyprland section above.
 
@@ -108,7 +116,8 @@ The app runs inside a bubblewrap sandbox with:
 - Read-only system directories (`/usr`, `/bin`, `/lib`, `/etc`)
 - Isolated `/tmp` (not shared with host)
 - Only home directory is writable
-- `/run` and `/var` are NOT mounted (prevents IPC socket access)
+- `/run` and `/var` are NOT mounted by default (prevents IPC socket access)
+- On `systemd-resolved` systems, the resolver target under `/run/systemd/resolve` is mounted read-only for DNS continuity
 
 Network isolation (optional):
 ```bash
@@ -126,7 +135,7 @@ claude --isolate-network
 
 ```bash
 sudo rm -rf /Applications/Claude.app
-sudo rm /usr/local/bin/claude
+sudo rm -f /usr/local/bin/claude /usr/local/bin/claude-cowork /usr/local/bin/claude-desktop
 rm -rf ~/Library/Application\ Support/Claude
 rm -rf ~/Library/Logs/Claude
 rm -rf ~/Library/Caches/Claude
