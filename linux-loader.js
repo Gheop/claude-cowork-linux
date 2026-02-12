@@ -368,6 +368,32 @@ console.log('[Electron] Patched systemPreferences + BrowserWindow.prototype + Me
 // This prevents the server from detecting "Linux" in the User-Agent header.
 
 const { app, session } = electron;
+let pendingClaudeUrls = [];
+
+function parseClaudeUrlArg(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.startsWith('claude://') ? trimmed : null;
+}
+
+function dispatchClaudeUrl(url) {
+  try {
+    app.emit('open-url', { preventDefault() {} }, url);
+    console.log('[Protocol] Forwarded URL to open-url:', url);
+  } catch (e) {
+    console.error('[Protocol] Failed to forward URL:', e.message);
+  }
+}
+
+app.on('second-instance', (_event, argv) => {
+  const candidates = Array.isArray(argv) ? argv : [];
+  for (const arg of candidates) {
+    const url = parseClaudeUrlArg(arg);
+    if (!url) continue;
+    pendingClaudeUrls.push(url);
+    if (app.isReady()) dispatchClaudeUrl(url);
+  }
+});
 
 // Set app-wide User-Agent fallback (used when session UA is not set)
 // Format: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/...
@@ -393,7 +419,23 @@ app.whenReady().then(() => {
         .replace(/Linux/, 'Mac OS X');
       defaultSession.setUserAgent(spoofedUA);
       console.log('[UserAgent] Spoofed session User-Agent');
+
+      if (process.env.CLAUDE_CLEAR_CACHE_ON_CLOSE === '1') {
+        app.on('before-quit', async () => {
+          try {
+            await defaultSession.clearCache();
+            await defaultSession.clearStorageData({
+              storages: ['appcache', 'serviceworkers', 'cachestorage'],
+            });
+            console.log('[Cache] Cleared session cache/storage on quit');
+          } catch (e) {
+            console.error('[Cache] Failed clearing cache on quit:', e.message);
+          }
+        });
+      }
     }
+    for (const url of pendingClaudeUrls) dispatchClaudeUrl(url);
+    pendingClaudeUrls = [];
   } catch (e) {
     console.error('[UserAgent] Failed to spoof session UA:', e.message);
   }
@@ -533,17 +575,293 @@ registerEipcHandler('ClaudeVM_$_getSupportStatus', async () => ({
 }));
 
 // ===== LocalAgentMode / Cowork sessions =====
-registerEipcHandler('LocalAgentModeSessions_$_getAll', async () => []);
+// Full session management with Claude Agent SDK bridge
 
-registerEipcHandler('LocalAgentModeSessions_$_create', async (_event, sessionData) => ({
-  id: `session-${Date.now()}`,
-  ...sessionData,
+const { CoworkSDKBridge } = require('./cowork/sdk_bridge');
+const { emitLocalAgentEvent, addDiscoveredUUID, extractUUID } = require('./cowork/event_dispatch');
+
+const sdkBridge = new CoworkSDKBridge();
+
+// In-memory session state
+const localAgentSessions = new Map();
+const trustedFolders = new Set();
+let focusedSessionId = null;
+
+// State persistence
+const LOCAL_AGENT_STATE_DIR = path.join(os.homedir(), '.config', 'Claude', 'LocalAgentModeSessions');
+const LOCAL_AGENT_STATE_FILE = path.join(LOCAL_AGENT_STATE_DIR, 'sessions.json');
+let stateSaveTimer = null;
+
+function generateUUID() {
+  const crypto = require('crypto');
+  const bytes = crypto.randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return [hex.substring(0,8), hex.substring(8,12), hex.substring(12,16),
+          hex.substring(16,20), hex.substring(20,32)].join('-');
+}
+
+function normalizeSessionId(sessionId) {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    return `local_${generateUUID()}`;
+  }
+  return sessionId.startsWith('local_') ? sessionId : `local_${sessionId}`;
+}
+
+function buildSession(info = {}) {
+  const sessionId = normalizeSessionId(info.sessionId);
+  const cwd = typeof info.sharedCwdPath === 'string' && info.sharedCwdPath.length > 0
+    ? (path.isAbsolute(info.sharedCwdPath) ? info.sharedCwdPath : path.join(os.homedir(), info.sharedCwdPath))
+    : process.cwd();
+  const now = Date.now();
+
+  return {
+    sessionId,
+    uuid: sessionId,
+    conversationUuid: sessionId,
+    cwd,
+    originCwd: cwd,
+    userSelectedFolders: Array.isArray(info.userSelectedFolders) ? info.userSelectedFolders : [],
+    userSelectedProjectUuids: Array.isArray(info.userSelectedProjectUuids) ? info.userSelectedProjectUuids : [],
+    isRunning: true,
+    model: typeof info.model === 'string' ? info.model : undefined,
+    title: typeof info.title === 'string' ? info.title : undefined,
+    createdAt: now,
+    lastActivityAt: now,
+    isArchived: false,
+    homePath: os.homedir(),
+    folderExists: true,
+    initialMessage: typeof info.message === 'string' ? info.message : undefined,
+    transcript: [],
+    name: typeof info.title === 'string' ? info.title : 'New Task',
+    created_at: new Date(now).toISOString(),
+    updated_at: new Date(now).toISOString(),
+  };
+}
+
+function getSession(sessionId) {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+  const direct = localAgentSessions.get(sessionId);
+  if (direct) return direct;
+  const normalized = sessionId.startsWith('local_') ? sessionId : `local_${sessionId}`;
+  return localAgentSessions.get(normalized) || null;
+}
+
+function updateSession(sessionId, updates) {
+  const session = getSession(sessionId);
+  if (!session || !updates || typeof updates !== 'object') return session;
+  Object.assign(session, updates);
+  session.lastActivityAt = Date.now();
+  session.updated_at = new Date().toISOString();
+  return session;
+}
+
+function saveState(reason) {
+  try {
+    fs.mkdirSync(LOCAL_AGENT_STATE_DIR, { recursive: true, mode: 0o700 });
+    const payload = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      sessions: Array.from(localAgentSessions.values()).map(s => {
+        // Strip transcript from persisted state (too large)
+        const { transcript, ...rest } = s;
+        return rest;
+      }),
+      trustedFolders: Array.from(trustedFolders),
+      focusedSessionId,
+    };
+    fs.writeFileSync(LOCAL_AGENT_STATE_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
+    console.log(`[Cowork] State saved (${reason})`);
+  } catch (e) {
+    console.error('[Cowork] Failed to save state:', e.message);
+  }
+}
+
+function scheduleSave(reason) {
+  if (stateSaveTimer) clearTimeout(stateSaveTimer);
+  stateSaveTimer = setTimeout(() => { stateSaveTimer = null; saveState(reason); }, 250);
+}
+
+function loadState() {
+  try {
+    if (!fs.existsSync(LOCAL_AGENT_STATE_FILE)) return;
+    const raw = fs.readFileSync(LOCAL_AGENT_STATE_FILE, 'utf8');
+    const payload = JSON.parse(raw);
+    const sessionList = Array.isArray(payload.sessions) ? payload.sessions : [];
+    for (const rawSession of sessionList) {
+      if (!rawSession || typeof rawSession !== 'object') continue;
+      const sessionId = normalizeSessionId(rawSession.sessionId || rawSession.uuid);
+      const session = {
+        ...rawSession,
+        sessionId,
+        uuid: sessionId,
+        conversationUuid: rawSession.conversationUuid || sessionId,
+        isRunning: false, // Not running after restart
+        transcript: [],
+      };
+      localAgentSessions.set(sessionId, session);
+    }
+    if (Array.isArray(payload.trustedFolders)) {
+      payload.trustedFolders.forEach(f => { if (typeof f === 'string' && f.length > 0) trustedFolders.add(f); });
+    }
+    if (typeof payload.focusedSessionId === 'string') {
+      focusedSessionId = payload.focusedSessionId;
+    }
+    console.log(`[Cowork] Loaded ${localAgentSessions.size} sessions from state`);
+  } catch (e) {
+    console.error('[Cowork] Failed to load state:', e.message);
+  }
+}
+
+// Load persisted sessions on startup
+loadState();
+
+// --- Session lifecycle handlers ---
+
+registerEipcHandler('LocalAgentModeSessions_$_start', async (_event, info) => {
+  const session = buildSession(info);
+  localAgentSessions.set(session.sessionId, session);
+  console.log('[Cowork] Starting session:', session.sessionId);
+
+  await sdkBridge.startSession(session.sessionId, session, emitLocalAgentEvent);
+  scheduleSave('start');
+  emitLocalAgentEvent({ type: 'sessionsUpdated', sessionId: session.sessionId });
+  return { sessionId: session.sessionId, conversationUuid: session.conversationUuid };
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_sendMessage', async (_event, sessionId, message, images, files) => {
+  const session = getSession(sessionId);
+  if (session) {
+    const entry = {
+      type: 'user',
+      message,
+      images: images || [],
+      files: files || [],
+      timestamp: Date.now(),
+    };
+    session.transcript.push(entry);
+    session.lastActivityAt = Date.now();
+    scheduleSave('sendMessage');
+    emitLocalAgentEvent({ type: 'message', sessionId, message: entry });
+
+    try {
+      await sdkBridge.sendMessage(sessionId, message);
+    } catch (e) {
+      console.error('[Cowork] sendMessage bridge error:', e.message);
+    }
+  }
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_stop', async (_event, sessionId) => {
+  const session = updateSession(sessionId, { isRunning: false });
+  console.log('[Cowork] Stopping session:', sessionId);
+  await sdkBridge.stopSession(sessionId);
+  scheduleSave('stop');
+  emitLocalAgentEvent({ type: 'sessionsUpdated', sessionId });
+  return session ? { success: true } : { success: false };
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_archive', async (_event, sessionId) => {
+  updateSession(sessionId, { isArchived: true, isRunning: false });
+  await sdkBridge.stopSession(sessionId);
+  scheduleSave('archive');
+  emitLocalAgentEvent({ type: 'sessionsUpdated', sessionId });
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_updateSession', async (_event, sessionId, updates) => {
+  updateSession(sessionId, updates);
+  scheduleSave('updateSession');
+  emitLocalAgentEvent({ type: 'sessionsUpdated', sessionId });
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_getSession', async (_event, sessionId) => {
+  return getSession(sessionId);
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_getAll', async () => {
+  const sessions = Array.from(localAgentSessions.values());
+  return sessions;
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_getTranscript', async (_event, sessionId) => {
+  // Combine our local transcript with SDK transcript
+  const session = getSession(sessionId);
+  const localTranscript = session?.transcript ?? [];
+  const sdkTranscript = sdkBridge.getTranscript(sessionId);
+  // SDK transcript has the full message history; local has user entries
+  // Return SDK transcript if available (richer), else local
+  return sdkTranscript.length > 0 ? sdkTranscript : localTranscript;
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_respondToToolPermission', async (_event, requestId, decision, updatedInput) => {
+  console.log('[Cowork] respondToToolPermission:', requestId, decision, Boolean(updatedInput));
+  // Future: broker permission through SDK canUseTool callback
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_openOutputsDir', async (_event, sessionId) => {
+  console.log('[Cowork] openOutputsDir:', sessionId);
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_shareSession', async (_event, sessionId) => {
+  console.log('[Cowork] shareSession:', sessionId);
+  return { success: false, error: 'Sharing not yet supported on Linux' };
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_setDraftSessionFolders', async (_event, folders) => {
+  console.log('[Cowork] setDraftSessionFolders:', folders?.length ?? 0);
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_getSupportedCommands', async () => []);
+
+registerEipcHandler('LocalAgentModeSessions_$_getTrustedFolders', async () => {
+  return Array.from(trustedFolders);
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_addTrustedFolder', async (_event, folder) => {
+  if (typeof folder === 'string' && folder.length > 0) {
+    trustedFolders.add(folder);
+    scheduleSave('addTrustedFolder');
+  }
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_removeTrustedFolder', async (_event, folder) => {
+  trustedFolders.delete(folder);
+  scheduleSave('removeTrustedFolder');
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_isFolderTrusted', async (_event, folder) => {
+  return trustedFolders.has(folder);
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_setMcpServers', async () => ({ added: [], removed: [] }));
+
+registerEipcHandler('LocalAgentModeSessions_$_setFirstPartyConnectors', async () => {
+  console.log('[Cowork] setFirstPartyConnectors');
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_setFocusedSession', async (_event, sessionId) => {
+  focusedSessionId = sessionId ?? null;
+  scheduleSave('setFocusedSession');
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_respondDirectoryServers', async (_event, requestId) => {
+  console.log('[Cowork] respondDirectoryServers:', requestId);
+});
+
+registerEipcHandler('LocalAgentModeSessions_$_mcpCallTool', async () => ({
+  content: [{ type: 'text', text: 'MCP tool calls not yet supported via Cowork on Linux' }],
+  isError: true,
 }));
 
-registerEipcHandler('LocalAgentModeSessions_$_get', async (_event, sessionId) => ({
-  id: sessionId,
-  status: 'active',
-}));
+registerEipcHandler('LocalAgentModeSessions_$_mcpReadResource', async () => ({ contents: [] }));
+
+registerEipcHandler('LocalAgentModeSessions_$_mcpListResources', async () => []);
+
+// Discover UUIDs from incoming eipc channels during handler registration
+const origRegisterEipcHandler = registerEipcHandler;
+// (UUID discovery happens via the ipcMain.handle patch in ipc-handler-setup.js,
+//  but we also capture from our own registration for completeness)
 
 // ===== AutoUpdater - prevent update checks =====
 registerEipcHandler('AutoUpdater_$_updaterState_$store$_getState', async () => ({

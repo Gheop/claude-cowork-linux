@@ -15,8 +15,8 @@
  *   - Then vm.spawn() to launch the Claude Code binary
  *
  * Path translations performed:
- *   - /usr/local/bin/claude -> ~/.config/Claude/claude-code-vm/2.1.5/claude
- *   - /sessions/... -> ~/.local/share/claude-cowork/sessions/...
+ *   - /usr/local/bin/claude -> ~/Library/Application Support/Claude/claude-code-vm/<latest>/claude
+ *   - /sessions/... -> ~/Library/Application Support/Claude/LocalAgentModeSessions/sessions/...
  *
  * Security hardening applied:
  *   - Command injection prevention (execFile instead of exec)
@@ -35,9 +35,13 @@ const { spawn: nodeSpawn, spawnSync: nodeSpawnSync, execFileSync } = require("ch
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
+
+const APP_SUPPORT_ROOT = path.join(os.homedir(), 'Library', 'Application Support', 'Claude');
+const LOCAL_AGENT_ROOT = path.join(APP_SUPPORT_ROOT, 'LocalAgentModeSessions');
 
 // SECURITY: Log to user-writable location with restricted permissions
-const LOG_DIR = path.join(os.homedir(), '.local/share/claude-cowork/logs');
+const LOG_DIR = path.join(APP_SUPPORT_ROOT, 'logs');
 const TRACE_FILE = path.join(LOG_DIR, 'claude-swift-trace.log');
 
 // Ensure log directory exists with secure permissions
@@ -113,7 +117,61 @@ function isPathSafe(basePath, targetPath) {
 }
 
 // Sessions directory in user space (not /sessions)
-const SESSIONS_BASE = path.join(os.homedir(), '.local/share/claude-cowork/sessions');
+const SESSIONS_BASE = path.join(LOCAL_AGENT_ROOT, 'sessions');
+
+function generateUUID() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const bytes = crypto.randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`;
+}
+
+function parseSemver(value) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value || ''));
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function compareSemverDesc(a, b) {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa && !pb) return 0;
+  if (!pa) return 1;
+  if (!pb) return -1;
+  for (let i = 0; i < 3; i += 1) {
+    if (pa[i] !== pb[i]) return pb[i] - pa[i];
+  }
+  return 0;
+}
+
+function resolveClaudeBinaryPath() {
+  const vmRoot = path.join(APP_SUPPORT_ROOT, 'claude-code-vm');
+  const preferred = path.join(vmRoot, '2.1.5', 'claude');
+  try {
+    const entries = fs
+      .readdirSync(vmRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort(compareSemverDesc);
+
+    for (const version of entries) {
+      const candidate = path.join(vmRoot, version, 'claude');
+      if (fs.existsSync(candidate)) {
+        trace('Resolved Claude binary: ' + candidate);
+        return candidate;
+      }
+    }
+  } catch (e) {
+    trace('Failed to auto-resolve claude-code-vm version: ' + e.message);
+  }
+
+  trace('Falling back to default Claude binary path: ' + preferred);
+  return preferred;
+}
 
 /**
  * Create mount symlinks for a session
@@ -124,7 +182,7 @@ const SESSIONS_BASE = path.join(os.homedir(), '.local/share/claude-cowork/sessio
  * }
  *
  * We create symlinks at:
- *   ~/.local/share/claude-cowork/sessions/<session>/mnt/<mountName>
+ *   ~/Library/Application Support/Claude/LocalAgentModeSessions/sessions/<session>/mnt/<mountName>
  * Pointing to:
  *   ~/<additionalMounts[mountName].path>
  *
@@ -387,7 +445,7 @@ class SwiftAddonStub extends EventEmitter {
         return Promise.resolve(null);
       },
       getSessionId: () => {
-        return 'linux-session-' + Date.now();
+        return `local_${generateUUID()}`;
       },
       // Get list of open documents (Linux implementation)
       getOpenDocuments: () => {
@@ -623,7 +681,7 @@ class SwiftAddonStub extends EventEmitter {
         return status;
       },
 
-      setEventCallbacks: (onStdout, onStderr, onExit, onError, onNetworkStatus) => {
+      setEventCallbacks: (onStdout, onStderr, onExit, onError, onNetworkStatus, onApiReachability) => {
         trace('vm.setEventCallbacks() CALLED with callbacks: stdout=' + !!onStdout + ' stderr=' + !!onStderr + ' exit=' + !!onExit);
         console.log('[claude-swift] vm.setEventCallbacks() called - REGISTERING CALLBACKS');
         console.log('[claude-swift] Callbacks: stdout=' + typeof onStdout + ' stderr=' + typeof onStderr + ' exit=' + typeof onExit);
@@ -632,9 +690,7 @@ class SwiftAddonStub extends EventEmitter {
         self._onExit = onExit;
         self._onError = onError;
         self._onNetworkStatus = onNetworkStatus;
-        if (self._onNetworkStatus) {
-          self._onNetworkStatus('connected');
-        }
+        self._onApiReachability = onApiReachability;
       },
 
       startVM: async (bundlePath, memoryGB) => {
@@ -707,7 +763,7 @@ class SwiftAddonStub extends EventEmitter {
         // SECURITY: Validate command is the expected Claude binary
         let hostCommand = command;
         if (command === '/usr/local/bin/claude') {
-          hostCommand = path.join(os.homedir(), '.config/Claude/claude-code-vm/2.1.5/claude');
+          hostCommand = resolveClaudeBinaryPath();
           trace('Translated command: ' + command + ' -> ' + hostCommand);
         } else {
           // SECURITY: Only allow the expected command
@@ -717,7 +773,7 @@ class SwiftAddonStub extends EventEmitter {
         }
 
         // SECURITY: Verify binary exists and is in expected location
-        const expectedDir = path.join(os.homedir(), '.config/Claude/claude-code-vm');
+        const expectedDir = path.join(APP_SUPPORT_ROOT, 'claude-code-vm');
         if (!hostCommand.startsWith(expectedDir)) {
           trace('SECURITY: Command outside expected directory: ' + hostCommand);
           if (self._onError) self._onError(id, 'Invalid binary path', '');
@@ -971,16 +1027,14 @@ class SwiftAddonStub extends EventEmitter {
   }
 
   // TOP-LEVEL METHODS (for API compatibility)
-  setEventCallbacks(onStdout, onStderr, onExit, onError, onNetworkStatus) {
+  setEventCallbacks(onStdout, onStderr, onExit, onError, onNetworkStatus, onApiReachability) {
     console.log('[claude-swift] setEventCallbacks() called - REGISTERING CALLBACKS');
     this._onStdout = onStdout;
     this._onStderr = onStderr;
     this._onExit = onExit;
     this._onError = onError;
     this._onNetworkStatus = onNetworkStatus;
-    if (this._onNetworkStatus) {
-      this._onNetworkStatus('connected');
-    }
+    this._onApiReachability = onApiReachability;
   }
 
   async startVM(bundlePath, memoryGB) {
