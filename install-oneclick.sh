@@ -443,6 +443,38 @@ Module._load = function(request, parent, isMain) {
 };
 
 const electron = require('electron');
+const app = electron.app;
+let pendingDeepLinks = [];
+
+function parseClaudeUrlArg(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.startsWith('claude://') ? trimmed : null;
+}
+
+function dispatchClaudeUrl(url) {
+  try {
+    app.emit('open-url', { preventDefault() {} }, url);
+    console.log('[Protocol] Forwarded URL:', url);
+  } catch (e) {
+    console.error('[Protocol] Failed to forward URL:', e.message);
+  }
+}
+
+app.on('second-instance', (_event, argv) => {
+  const args = Array.isArray(argv) ? argv : [];
+  for (const arg of args) {
+    const url = parseClaudeUrlArg(arg);
+    if (!url) continue;
+    pendingDeepLinks.push(url);
+    if (app.isReady()) dispatchClaudeUrl(url);
+  }
+});
+
+app.whenReady().then(() => {
+  for (const url of pendingDeepLinks) dispatchClaudeUrl(url);
+  pendingDeepLinks = [];
+});
 
 const origSysPrefs = electron.systemPreferences || {};
 const patchedSysPrefs = {
@@ -566,7 +598,7 @@ confirm_sudo_operations() {
     log_warn "The following operations require sudo (root) privileges:"
     echo "  - Create directory: $INSTALL_DIR"
     echo "  - Copy application files to $INSTALL_DIR"
-    echo "  - Create symlink: /usr/local/bin/claude"
+    echo "  - Create symlinks: /usr/local/bin/claude-desktop and /usr/local/bin/claude-cowork"
     echo ""
     read -r -p "Proceed with installation? [Y/n] " response
     response=${response:-Y}
@@ -622,8 +654,13 @@ install_app() {
     # Create launcher
     create_launcher "$INSTALL_DIR/Contents/MacOS"
 
-    # Create symlink in PATH
-    sudo ln -sf "$INSTALL_DIR/Contents/MacOS/Claude" /usr/local/bin/claude
+    # Create canonical launchers in PATH
+    sudo ln -sf "$INSTALL_DIR/Contents/MacOS/Claude" /usr/local/bin/claude-desktop
+    sudo ln -sf "$INSTALL_DIR/Contents/MacOS/Claude" /usr/local/bin/claude-cowork
+    # Back-compat only: do not clobber existing Claude Code CLI if already installed.
+    if [[ ! -e /usr/local/bin/claude ]]; then
+      sudo ln -sf "$INSTALL_DIR/Contents/MacOS/Claude" /usr/local/bin/claude
+    fi
 
     log_success "Installed to $INSTALL_DIR"
 }
@@ -683,18 +720,22 @@ create_desktop_entry() {
 Type=Application
 Name=Claude
 Comment=AI assistant by Anthropic
-Exec=/usr/local/bin/claude
+Exec=/usr/local/bin/claude-desktop %U
 Icon=$INSTALL_DIR/Contents/Resources/icon.icns
 Terminal=false
 Categories=Utility;Development;Chat;
 Keywords=AI;assistant;chat;anthropic;
 StartupWMClass=Claude
+MimeType=x-scheme-handler/claude;
 EOF
 
     chmod +x ~/.local/share/applications/claude.desktop
 
     if command_exists update-desktop-database; then
         update-desktop-database ~/.local/share/applications 2>/dev/null || true
+    fi
+    if command_exists xdg-mime; then
+        xdg-mime default claude.desktop x-scheme-handler/claude 2>/dev/null || true
     fi
 
     log_success "Desktop entry created"
@@ -755,7 +796,8 @@ main() {
     echo "=========================================="
     echo ""
     echo "Launch Claude:"
-    echo "  Command:  claude"
+    echo "  Command:  claude-cowork"
+    echo "  Alt Cmd:  claude-desktop"
     echo "  Desktop:  Search for 'Claude' in app launcher"
     echo ""
     echo "Options:"
