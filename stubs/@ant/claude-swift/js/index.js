@@ -93,7 +93,7 @@ const ENV_ALLOWLIST = [
   'DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS',
   'NODE_ENV', 'ELECTRON_RUN_AS_NODE',
   // Claude-specific
-  'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'
 ];
 
 function filterEnv(baseEnv, additionalEnv) {
@@ -429,7 +429,6 @@ class SwiftAddonStub extends EventEmitter {
     this._onExit = null;
     this._onError = null;
     this._onNetworkStatus = null;
-
     // Events system - native.events.setListener()
     this.events = {
       setListener: (callback) => {
@@ -1015,8 +1014,12 @@ class SwiftAddonStub extends EventEmitter {
       addApprovedOauthToken: async (token) => {
         trace('vm.addApprovedOauthToken() token=<redacted>');
         console.log('[claude-swift] vm.addApprovedOauthToken() called');
-        // Store the token for future use
-        // On Linux, we don't have a VM, so we just acknowledge the token
+        // IMPORTANT: This must remain a no-op on Linux.
+        // On macOS the VM's MITM proxy uses this token to inject auth headers.
+        // On Linux the asar already passes CLAUDE_CODE_OAUTH_TOKEN in the
+        // spawn env vars, and the CLI handles it internally. Do NOT store
+        // this token or inject it as ANTHROPIC_AUTH_TOKEN -- that bypasses
+        // the CLI's OAuth code path and causes a 401 from the API.
         return { success: true };
       },
 
@@ -1116,9 +1119,23 @@ class SwiftAddonStub extends EventEmitter {
 
   spawn(id, processName, command, args, options, envVars, additionalMounts, isResume, allowedDomains, sharedCwdPath) {
     console.log('[claude-swift] spawn() id=' + id + ' cmd=' + command + ' args=' + JSON.stringify(args));
+    // Log auth-related env vars from the asar (redact values) so we can debug auth issues
+    if (envVars && typeof envVars === 'object') {
+      const authKeys = Object.keys(envVars).filter(k => /ANTHROPIC|AUTH|TOKEN|API_KEY|OAUTH/i.test(k));
+      if (authKeys.length > 0) {
+        trace('spawn envVars auth keys from asar: ' + authKeys.join(', '));
+      }
+      trace('spawn envVars keys from asar: ' + Object.keys(envVars).join(', '));
+    }
     try {
       // SECURITY: Filter environment variables
       const env = filterEnv(process.env, envVars);
+      // IMPORTANT: Do NOT add auth fixup code here.
+      // The asar passes CLAUDE_CODE_OAUTH_TOKEN in envVars, which filterEnv
+      // merges via Object.assign. The CLI handles this token through its own
+      // internal OAuth code path. Injecting ANTHROPIC_AUTH_TOKEN bypasses
+      // that path and causes a 401 ("OAuth authentication not supported").
+      // See CLAUDE.md "Critical: Auth Flow" for full explanation.
       const cwd = sharedCwdPath || (options && options.cwd) || process.cwd();
       const proc = nodeSpawn(command, args || [], Object.assign({ cwd: cwd, env: env, stdio: ['pipe', 'pipe', 'pipe'] }, options || {}));
       this._processes.set(id, proc);
