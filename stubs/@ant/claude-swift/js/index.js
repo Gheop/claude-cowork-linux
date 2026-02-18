@@ -808,7 +808,7 @@ class SwiftAddonStub extends EventEmitter {
 
         // SECURITY: Validate command is the expected Claude binary
         let hostCommand = command;
-        if (command === '/usr/local/bin/claude') {
+        if (command === '/usr/local/bin/claude' || command === 'claude') {
           hostCommand = resolveClaudeBinaryPath();
           trace('Translated command: ' + command + ' -> ' + hostCommand);
         } else {

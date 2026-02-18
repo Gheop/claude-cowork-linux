@@ -6,6 +6,7 @@ set -e
 
 VERSION="1.23.26"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYMLINK_NAME="${SYMLINK_NAME:-cowork}"
 
 echo "=========================================="
 echo "Claude Linux Installer v${VERSION}"
@@ -45,10 +46,18 @@ if [ -d "claude-app-2-1.23.26/Claude.app" ]; then
   CLAUDE_APP="$SCRIPT_DIR/claude-app-2-1.23.26/Claude.app"
   echo "✓ Found: Extracted Claude.app"
 else
-  DMG_FILE=$(find "$SCRIPT_DIR" -name "Claude-2-*.dmg" 2>/dev/null | head -1)
+  # Accept DMG path as first argument, or search for one
+  if [ -n "$1" ] && [ -f "$1" ]; then
+    DMG_FILE="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+  elif [ -n "$1" ] && [ -f "$SCRIPT_DIR/$1" ]; then
+    DMG_FILE="$SCRIPT_DIR/$1"
+  else
+    DMG_FILE=$(find "$SCRIPT_DIR" -maxdepth 1 -name "Claude*.dmg" 2>/dev/null | head -1)
+  fi
 
   if [ -z "$DMG_FILE" ]; then
     echo "✗ No Claude DMG or extracted app found"
+    echo "  Usage: $0 [path/to/Claude.dmg]"
     exit 1
   fi
 
@@ -156,6 +165,12 @@ fi
 
 # Copy .vite directory to where the app expects it (Resources/.vite)
 sudo cp -r "$APP_EXTRACT/.vite" /Applications/Claude.app/Contents/Resources/.vite
+
+# Copy i18n locale files to where the app expects them (app/resources/i18n/)
+echo "  Installing i18n locale files..."
+sudo mkdir -p /Applications/Claude.app/Contents/Resources/app/resources/i18n
+sudo cp /Applications/Claude.app/Contents/Resources/*.json /Applications/Claude.app/Contents/Resources/app/resources/i18n/ 2>/dev/null || true
+echo "  ✓ Locale files installed to app/resources/i18n/"
 
 echo "✓ Application structure created"
 
@@ -499,11 +514,11 @@ LAUNCHEREOF
 
 sudo chmod +x /Applications/Claude.app/Contents/MacOS/Claude
 
-# Create symlink in PATH
-sudo ln -sf /Applications/Claude.app/Contents/MacOS/Claude /usr/local/bin/claude
+# Create symlink in PATH (default: 'cowork', override with SYMLINK_NAME=claude ./install.sh)
+sudo ln -sf /Applications/Claude.app/Contents/MacOS/Claude "/usr/local/bin/$SYMLINK_NAME"
 
 echo "✓ Launch script created"
-echo "✓ Symlink: /usr/local/bin/claude → Claude.app"
+echo "✓ Symlink: /usr/local/bin/$SYMLINK_NAME → Claude.app"
 
 # ============================================================
 # CREATE USER DIRECTORIES
@@ -631,11 +646,11 @@ echo "  Logs:     ~/Library/Logs/Claude/"
 echo "  Cache:    ~/Library/Caches/Claude/"
 echo ""
 echo "Launch Claude:"
-echo "  Command:  claude"
+echo "  Command:  $SYMLINK_NAME"
 echo "  Desktop:  Search for 'Claude' in app launcher"
 echo ""
 echo "Startup logs:"
 echo "  ~/Library/Logs/Claude/startup.log"
 echo ""
-echo "Test with:  claude"
+echo "Test with:  $SYMLINK_NAME"
 echo ""
