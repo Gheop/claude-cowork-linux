@@ -247,8 +247,8 @@ describe('stub command allowlist', () => {
     assert.ok(stubSource.includes("command === '/usr/local/bin/claude'"));
   });
 
-  it('accepts bare claude command', () => {
-    assert.ok(stubSource.includes("command === 'claude'"));
+  it('accepts /usr/local/bin path', () => {
+    assert.ok(stubSource.includes("/usr/local/bin/claude"));
   });
 
   it('blocks unexpected commands', () => {

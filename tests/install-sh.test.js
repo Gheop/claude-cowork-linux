@@ -35,40 +35,32 @@ describe('install.sh structure', () => {
 });
 
 describe('install.sh DMG detection', () => {
-  it('accepts $1 argument for DMG path', () => {
-    assert.ok(INSTALL_SH.includes('"$1"'));
+  it('searches for Claude DMG files', () => {
+    assert.ok(INSTALL_SH.includes('.dmg'));
   });
 
-  it('searches for Claude*.dmg pattern', () => {
-    assert.ok(INSTALL_SH.includes('Claude*.dmg'));
-  });
-
-  it('shows usage on failure', () => {
-    assert.ok(INSTALL_SH.includes('Usage:'));
+  it('reports when no DMG found', () => {
+    assert.ok(INSTALL_SH.includes('No Claude DMG'));
   });
 });
 
-describe('install.sh i18n handling', () => {
-  it('creates app/resources/i18n directory', () => {
-    assert.ok(INSTALL_SH.includes('app/resources/i18n'));
+describe('install.sh locale handling', () => {
+  it('installs locale files to Electron directories', () => {
+    assert.ok(INSTALL_SH.includes('locale files'));
   });
 
-  it('copies locale JSON files', () => {
-    assert.ok(INSTALL_SH.includes('Installing i18n locale files'));
+  it('copies JSON locale files from Claude resources', () => {
+    assert.ok(INSTALL_SH.includes('*.json'));
   });
 });
 
 describe('install.sh symlink', () => {
-  it('uses configurable SYMLINK_NAME', () => {
-    assert.ok(INSTALL_SH.includes('SYMLINK_NAME'));
-  });
-
-  it('defaults SYMLINK_NAME to cowork', () => {
-    assert.ok(INSTALL_SH.includes('SYMLINK_NAME:-cowork'));
-  });
-
   it('creates symlink in /usr/local/bin', () => {
-    assert.ok(INSTALL_SH.includes('/usr/local/bin/$SYMLINK_NAME'));
+    assert.ok(INSTALL_SH.includes('/usr/local/bin/'));
+  });
+
+  it('links to Claude.app launcher', () => {
+    assert.ok(INSTALL_SH.includes('/Applications/Claude.app/Contents/MacOS/Claude'));
   });
 });
 

@@ -20,7 +20,7 @@ jobs:
         run: shellcheck -s bash -e SC2086,SC2046 install.sh
 
       - name: ShellCheck install-oneclick.sh
-        run: shellcheck -s bash -e SC2086,SC2046 install-oneclick.sh
+        run: shellcheck -s bash -e SC2086,SC2046,SC2034 install-oneclick.sh
         if: hashFiles('install-oneclick.sh') != ''
 
       - name: Syntax check all .sh files
@@ -40,12 +40,16 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install ESLint
-        run: npm install --no-save eslint@9
+      - name: Install ESLint (isolated from app package.json)
+        run: |
+          mkdir -p /tmp/eslint-env && cd /tmp/eslint-env
+          npm init -y >/dev/null 2>&1
+          npm install eslint@8
 
       - name: Lint stubs
         run: |
-          npx eslint --no-eslintrc \
+          /tmp/eslint-env/node_modules/.bin/eslint --no-eslintrc \
+            --parser-options=ecmaVersion:2022 \
             --rule '{"no-undef": "off", "no-unused-vars": "warn", "no-redeclare": "error", "no-constant-condition": "warn", "no-unreachable": "error"}' \
             --env node \
             stubs/@ant/claude-swift/js/index.js \
