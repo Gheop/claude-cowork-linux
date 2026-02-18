@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-bash:
+    name: Lint shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: ShellCheck install.sh
+        run: shellcheck -s bash -e SC2086,SC2046 install.sh
+
+      - name: ShellCheck install-oneclick.sh
+        run: shellcheck -s bash -e SC2086,SC2046 install-oneclick.sh
+        if: hashFiles('install-oneclick.sh') != ''
+
+      - name: Syntax check all .sh files
+        run: |
+          for f in *.sh; do
+            echo "Checking $f..."
+            bash -n "$f"
+          done
+
+  lint-js:
+    name: Lint JavaScript stubs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ESLint
+        run: npm install --no-save eslint@9
+
+      - name: Lint stubs
+        run: |
+          npx eslint --no-eslintrc \
+            --rule '{"no-undef": "off", "no-unused-vars": "warn", "no-redeclare": "error", "no-constant-condition": "warn", "no-unreachable": "error"}' \
+            --env node \
+            stubs/@ant/claude-swift/js/index.js \
+            stubs/@ant/claude-native/index.js
+
+      - name: Check syntax (Node parse)
+        run: |
+          node --check stubs/@ant/claude-swift/js/index.js
+          node --check stubs/@ant/claude-native/index.js
+
+  test-stubs:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run stub tests
+        run: node --test tests/*.test.js
+
+  test-security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No hardcoded secrets in stubs
+        run: |
+          if grep -rn 'sk-ant-\|ANTHROPIC_API_KEY=\S' stubs/ --include='*.js' | grep -v 'REDACTED\|allowlist\|replace\|regex\|ENV_ALLOWLIST'; then
+            echo "::error::Potential hardcoded secret found in stubs"
+            exit 1
+          fi
+
+      - name: Command allowlist is restrictive
+        run: |
+          # Ensure only known commands are accepted in spawn()
+          if ! grep -q "Unexpected command blocked" stubs/@ant/claude-swift/js/index.js; then
+            echo "::error::Missing command validation in swift stub spawn()"
+            exit 1
+          fi
+
+      - name: Environment filtering is active
+        run: |
+          if ! grep -q "ENV_ALLOWLIST" stubs/@ant/claude-swift/js/index.js; then
+            echo "::error::Missing ENV_ALLOWLIST in swift stub"
+            exit 1
+          fi
+
+      - name: Path traversal protection exists
+        run: |
+          if ! grep -q "isPathSafe" stubs/@ant/claude-swift/js/index.js; then
+            echo "::error::Missing path traversal protection"
+            exit 1
+          fi
+
+      - name: Log redaction is active
+        run: |
+          if ! grep -q "redactForLogs" stubs/@ant/claude-swift/js/index.js; then
+            echo "::error::Missing log redaction"
+            exit 1
+          fi
+
+  test-install-dry:
+    name: Install script dry-run validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate install.sh syntax
+        run: bash -n install.sh
+
+      - name: Check install.sh doesn't contain hardcoded user paths
+        run: |
+          if grep -n '/home/zack\|/home/sib\|/Users/' install.sh; then
+            echo "::error::install.sh contains hardcoded user paths"
+            exit 1
+          fi
+
+      - name: Check stubs don't contain hardcoded user paths
+        run: |
+          if grep -rn '/home/zack\|/home/sib\|/Users/' stubs/; then
+            echo "::error::Stubs contain hardcoded user paths"
+            exit 1
+          fi
