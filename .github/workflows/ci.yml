@@ -50,7 +50,7 @@ jobs:
         run: |
           /tmp/eslint-env/node_modules/.bin/eslint --no-eslintrc \
             --parser-options=ecmaVersion:2022 \
-            --rule '{"no-undef": "off", "no-unused-vars": "warn", "no-redeclare": "error", "no-constant-condition": "warn", "no-unreachable": "error"}' \
+            --rule '{"no-undef": "off", "no-unused-vars": ["warn", {"args": "none"}], "no-redeclare": "error", "no-constant-condition": "warn", "no-unreachable": "error"}' \
             --env node \
             stubs/@ant/claude-swift/js/index.js \
             stubs/@ant/claude-native/index.js
